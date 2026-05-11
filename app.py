@@ -53,7 +53,9 @@ _BEDROCK_REGION_PREFIX = {
     "ap": "apac",
 }
 
-# Full prompt for Claude (handles all Qlik MCP tools with routing)
+# System prompt for the ReAct agent. The tool list is supplied at runtime by
+# MCP; the prompt only provides routing hints — keep these generic so the
+# prompt doesn't drift if Qlik adds or renames tools.
 SYSTEM_PROMPT = """You are a Qlik Cloud data analyst assistant. Use the available tools to answer questions about the user's Qlik Cloud tenant. Always call tools — never guess or make up data.
 
 QUESTION ROUTING — match the user's question to the right tool:
@@ -208,9 +210,14 @@ async def render_charts(text: str) -> str:
                 img_path = os.path.join(tempfile.gettempdir(), f"chart_{chart_id}.png")
                 pio.write_image(fig, img_path, width=700, height=400)
 
-                # Send as Chainlit image element
+                # Send as Chainlit image element. Chainlit copies the file into
+                # the session's element store, so we can remove our temp copy.
                 elements = [cl.Image(name=title, path=img_path, display="inline")]
                 await cl.Message(content=f"**{title}**", elements=elements).send()
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
 
                 result += rest
             except Exception as e:
@@ -249,7 +256,29 @@ def _validate_qlik_tenant(tenant_url: str) -> str:
             f"Qlik tenant host {host!r} not in allowlist. "
             f"Set QLIK_TENANT_ALLOWLIST=.your-domain.com to permit it."
         )
-    return f"{parsed.scheme}://{host}"
+    # Preserve netloc so self-hosted tenants on non-443 ports keep their port.
+    return f"https://{parsed.netloc.lower()}"
+
+
+def _flatten_exception_group(eg: BaseException) -> list[str]:
+    """Walk a possibly nested ExceptionGroup into flat 'Type: msg' strings."""
+    out: list[str] = []
+
+    def visit(e: BaseException) -> None:
+        if isinstance(e, BaseExceptionGroup):  # noqa: F821 — 3.11+ builtin
+            for sub in e.exceptions:
+                visit(sub)
+        else:
+            out.append(f"{type(e).__name__}: {e}")
+
+    visit(eg)
+    return out
+
+
+def _escape_for_codeblock(text: str) -> str:
+    """Make text safe to drop inside a fenced markdown code block."""
+    # Replace any triple-backtick that would close the fence early.
+    return str(text).replace("```", "ʼʼʼ")
 
 
 async def connect_qlik_mcp(tenant_url: str, access_token: str, client_id: str):
@@ -270,9 +299,8 @@ async def connect_qlik_mcp(tenant_url: str, access_token: str, client_id: str):
     })
     try:
         tools = await mcp_client.get_tools()
-    except ExceptionGroup as eg:
-        msgs = [f"{type(e).__name__}: {e}" for e in eg.exceptions]
-        raise RuntimeError("; ".join(msgs)) from eg
+    except BaseExceptionGroup as eg:  # noqa: F821 — 3.11+ builtin
+        raise RuntimeError("; ".join(_flatten_exception_group(eg))) from eg
     logger.info(f"MCP connected with {len(tools)} tools")
     return mcp_client, tools
 
@@ -341,6 +369,15 @@ async def on_chat_start():
     ).send()
 
 
+@cl.on_chat_end
+async def on_chat_end():
+    """Release the MCP client when the user closes the chat."""
+    try:
+        await disconnect_qlik_mcp()
+    except Exception as e:
+        logger.debug(f"on_chat_end cleanup failed: {e}")
+
+
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
     temperature = settings.get("temperature") or 0.2
@@ -400,7 +437,8 @@ async def on_message(message: cl.Message):
             ).send()
         except Exception as e:
             logger.error(f"MCP connection failed: {e}")
-            await cl.Message(content=f"Qlik MCP connection failed:\n```\n{e}\n```").send()
+            safe = _escape_for_codeblock(e)
+            await cl.Message(content=f"Qlik MCP connection failed:\n```\n{safe}\n```").send()
 
     agent = cast(CompiledStateGraph | None, cl.user_session.get("agent"))
 
@@ -425,6 +463,7 @@ async def on_message(message: cl.Message):
     config = RunnableConfig(configurable={"thread_id": cl.context.session.id})
     response_message = cl.Message(content="")
     full_text = ""
+    response_sent = False
     try:
         async for msg, metadata in agent.astream(
             {"messages": message.content}, stream_mode="messages", config=config,
@@ -439,14 +478,15 @@ async def on_message(message: cl.Message):
                     await response_message.stream_token(token)
                     full_text += token
         await response_message.send()
+        response_sent = True
 
         # Render any charts in the response
         if "```chart" in full_text:
             await render_charts(full_text)
 
     except Exception as e:
-        # Flush whatever was streamed before the error so it isn't lost.
-        if full_text:
+        # Flush partial stream once, before error message, so content isn't lost.
+        if full_text and not response_sent:
             try:
                 await response_message.send()
             except Exception:
@@ -456,5 +496,5 @@ async def on_message(message: cl.Message):
             cl.user_session.set("agent", None)
             await cl.Message(content="Connection lost. Click the **plug icon** to reconnect.").send()
         else:
-            await cl.Message(content=f"Error: {str(e)}").send()
+            await cl.Message(content=f"Error: {_escape_for_codeblock(e)}").send()
             logger.error(traceback.format_exc())

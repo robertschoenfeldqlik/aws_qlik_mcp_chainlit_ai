@@ -25,13 +25,13 @@ A branded web chat application that connects **Qlik Cloud** data to **Anthropic 
                                    ▼
                           ┌──────────────────┐
                           │  Qlik Cloud MCP  │
-                          │  51 tools        │
+                          │  (tools list)    │
                           └──────────────────┘
 ```
 
 ## How It Works
 
-1. **Plug icon** → Enter Qlik Tenant URL + OAuth Client ID → OAuth redirect → Approve → **51 Qlik tools loaded**
+1. **Plug icon** → Enter Qlik Tenant URL + OAuth Client ID → OAuth redirect → Approve → Qlik tools loaded
 2. **Gear icon** → Configure Bedrock API Key, region, model
 3. **Ask questions** → Claude calls Qlik MCP tools → returns data from your tenant
 
@@ -133,7 +133,7 @@ The plug icon opens a Qlik-branded form:
 - **Qlik Tenant URL** — `https://your-tenant.us.qlikcloud.com`
 - **OAuth Client ID** — from your Qlik admin
 
-Click **Connect** → redirects to Qlik Cloud OAuth → sign in → approve → **51 tools loaded**.
+Click **Connect** → redirects to Qlik Cloud OAuth → sign in → approve → tools loaded (count shown in the chat).
 
 The OAuth flow uses **Authorization Code + PKCE (S256)** via the `streamable-http` MCP transport.
 
@@ -173,7 +173,7 @@ For full details on the Qlik MCP server, available tools, connection parameters,
 | **Agent** | [LangGraph](https://langchain-ai.github.io/langgraph/) ReAct agent |
 | **MCP Bridge** | [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) |
 | **MCP Transport** | streamable-http with OAuth PKCE |
-| **Data Source** | [Qlik Cloud MCP](https://help.qlik.com/en-US/cloud-services/Subsystems/Hub/Content/Sense_Hub/QlikMCP/Connecting-Qlik-MCP-server.htm) — 51 tools |
+| **Data Source** | [Qlik Cloud MCP](https://help.qlik.com/en-US/cloud-services/Subsystems/Hub/Content/Sense_Hub/QlikMCP/Connecting-Qlik-MCP-server.htm) |
 | **Theming** | Qlik brand colors + Source Sans 3 font |
 
 ## Troubleshooting

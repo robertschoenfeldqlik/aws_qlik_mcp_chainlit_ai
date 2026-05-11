@@ -84,6 +84,7 @@ def _challenge(v: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _validate_tenant(tenant_url: str) -> str:
+    """Reject non-https URLs and hostnames outside the Qlik Cloud allowlist."""
     parsed = urlparse(tenant_url)
     if parsed.scheme != "https":
         raise ValueError("Tenant URL must use https://")
@@ -96,7 +97,28 @@ def _validate_tenant(tenant_url: str) -> str:
     ]
     if not any(host == s.lstrip(".") or host.endswith(s) for s in allowed):
         raise ValueError(f"Tenant host {host!r} not in QLIK_TENANT_ALLOWLIST")
-    return f"https://{host}"
+    # Preserve netloc (with port) for self-hosted setups that don't run on 443.
+    return f"https://{parsed.netloc.lower()}"
+
+
+def _same_origin_request(request) -> bool:
+    """Reject cross-origin POSTs to mutating endpoints (basic CSRF defense).
+
+    Compares the request's Origin (or Referer) header against the public
+    APP_BASE_URL. If APP_BASE_URL is unset, falls back to the request host so
+    local dev still works without configuration.
+    """
+    expected = os.getenv("APP_BASE_URL", "").rstrip("/")
+    if not expected:
+        # Best-effort fallback: derive from request scheme + host.
+        expected = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    referer = request.headers.get("referer") or ""
+    if origin and origin == expected:
+        return True
+    if referer.startswith(expected + "/") or referer == expected:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +137,10 @@ def register_oauth_routes(app):
 
     @router.get("/auth/qlik/status")
     async def status(request: Request):
+        # Same-origin gate keeps the access token out of cross-site fetches
+        # that happen to guess a state UUID.
+        if not _same_origin_request(request):
+            return JSONResponse({"error": "cross-origin request rejected"}, 403)
         _cleanup()
         state = request.query_params.get("state", "")
         if state in completed_tokens:
@@ -131,7 +157,17 @@ def register_oauth_routes(app):
 
     @router.post("/auth/qlik/connect")
     async def connect(request: Request):
-        """JS calls this after OAuth — stores token for app.py to pick up."""
+        """JS calls this after OAuth — stores token for app.py to pick up.
+
+        CSRF-protected via same-origin check on Origin/Referer.
+        """
+        if not _same_origin_request(request):
+            logger.warning(
+                f"Rejecting cross-origin /auth/qlik/connect from "
+                f"Origin={request.headers.get('origin')!r} "
+                f"Referer={request.headers.get('referer')!r}"
+            )
+            return JSONResponse({"error": "cross-origin request rejected"}, 403)
         try:
             body = await request.json()
             key = (body.get("session_id") or "").strip()
