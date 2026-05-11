@@ -281,6 +281,64 @@ def _escape_for_codeblock(text: str) -> str:
     return str(text).replace("```", "ʼʼʼ")
 
 
+class _ChartFenceFilter:
+    """Stream-time filter that strips ```chart …``` fenced blocks token by token.
+
+    The model is instructed to emit chart JSON inside ```chart fences; we render
+    those as separate image messages and don't want the raw JSON to appear in
+    the streamed text. Because tokens are arbitrary chunks (the marker can
+    span multiple tokens), the filter buffers a short tail until it knows
+    whether it's about to enter a fence.
+    """
+
+    _OPEN = "```chart"
+    _CLOSE = "```"
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_chart = False
+
+    def feed(self, token: str) -> str:
+        """Consume a token; return only the portion safe to stream out now."""
+        out_parts: list[str] = []
+        self._buf += token
+
+        while True:
+            if not self._in_chart:
+                idx = self._buf.find(self._OPEN)
+                if idx >= 0:
+                    out_parts.append(self._buf[:idx])
+                    self._buf = self._buf[idx + len(self._OPEN):]
+                    self._in_chart = True
+                    continue
+                # Hold back enough chars that a partial _OPEN can't slip through.
+                hold = len(self._OPEN) - 1
+                if len(self._buf) > hold:
+                    out_parts.append(self._buf[:-hold])
+                    self._buf = self._buf[-hold:]
+                break
+            else:
+                idx = self._buf.find(self._CLOSE)
+                if idx >= 0:
+                    self._buf = self._buf[idx + len(self._CLOSE):]
+                    self._in_chart = False
+                    continue
+                # Stay inside the fence; drop everything except a possible
+                # partial closing marker.
+                hold = len(self._CLOSE) - 1
+                self._buf = self._buf[-hold:] if hold else ""
+                break
+
+        return "".join(out_parts)
+
+    def flush(self) -> str:
+        """Emit any trailing buffered text once streaming ends."""
+        if self._in_chart:
+            return ""  # unclosed fence — drop, the chart will be rendered separately
+        tail, self._buf = self._buf, ""
+        return tail
+
+
 async def connect_qlik_mcp(tenant_url: str, access_token: str, client_id: str):
     """Connect to Qlik MCP using streamable-http with Bearer token + X-Agent-Id."""
     tenant_url = _validate_qlik_tenant(tenant_url)
@@ -378,6 +436,62 @@ async def on_chat_end():
         logger.debug(f"on_chat_end cleanup failed: {e}")
 
 
+async def _connect_mcp_for_session(token: str, tenant: str, client_id: str) -> None:
+    """Disconnect any existing MCP client and (re)connect with the given creds.
+
+    Runs in the user's Chainlit session context — used by both
+    on_window_message (immediate) and on_message (deferred fallback).
+    """
+    cl.user_session.set("qlik_access_token", token)
+    cl.user_session.set("qlik_tenant_url", tenant)
+    cl.user_session.set("qlik_client_id", client_id)
+    try:
+        await disconnect_qlik_mcp()
+        mcp_client, tools = await connect_qlik_mcp(tenant, token, client_id)
+        cl.user_session.set("mcp_client", mcp_client)
+        cl.user_session.set("mcp_tools", tools)
+        build_agent_if_ready()
+        await cl.Message(
+            content=f"Connected to Qlik MCP — **{len(tools)} tools** available. Ask me anything!"
+        ).send()
+    except Exception as e:
+        logger.error(f"MCP connection failed: {e}")
+        safe = _escape_for_codeblock(e)
+        await cl.Message(content=f"Qlik MCP connection failed:\n```\n{safe}\n```").send()
+
+
+@cl.on_window_message
+async def on_window_message(message) -> None:
+    """Receive OAuth completion directly from JS, bound to this WebSocket session.
+
+    Chainlit forwards `window.postMessage` events from the page to this hook,
+    which runs in the user's session context — so the MCP connection is bound
+    to the correct cl.user_session without needing the pending_connections
+    side-channel.
+    """
+    data = message
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return
+    if not isinstance(data, dict) or data.get("type") != "qlik_oauth_complete":
+        return
+    token = data.get("access_token")
+    tenant = data.get("tenant_url")
+    if not token or not tenant:
+        return
+    try:
+        _validate_qlik_tenant(tenant)
+    except ValueError as e:
+        await cl.Message(content=f"Qlik tenant rejected: {_escape_for_codeblock(e)}").send()
+        return
+    # Mark this session as already connected so the deferred fallback in
+    # on_message doesn't try to connect again with the same token.
+    cl.user_session.set("qlik_connected_via_window_msg", True)
+    await _connect_mcp_for_session(token, tenant, data.get("client_id", ""))
+
+
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
     temperature = settings.get("temperature") or 0.2
@@ -393,52 +507,29 @@ async def on_settings_update(settings: dict):
 
 
 def _consume_pending_connection() -> dict | None:
-    """Pop the pending OAuth result keyed to this Chainlit session.
+    """Pop the pending OAuth result keyed strictly to this Chainlit session.
 
-    The OAuth popup stores tokens keyed by Chainlit's WebSocket session ID
-    (passed via /auth/qlik/start state). Fall back to any single pending entry
-    for single-user/dev mode if no exact match exists.
+    The OAuth popup stores tokens keyed by the per-tab session ID that the JS
+    passed through /auth/qlik/start. Each Chainlit session matches a single
+    browser tab; with on_window_message also firing immediately, this
+    fallback only runs when window.postMessage didn't reach the backend
+    (e.g. JS disabled in a downstream proxy). No cross-session fallback —
+    that would let user A pick up user B's pending token.
     """
     session_id = cl.context.session.id
-    pending = pending_connections.pop(session_id, None)
-    if pending is not None:
-        return pending
-    # Single-user fallback: if exactly one connection is pending, use it.
-    if len(pending_connections) == 1:
-        only_key = next(iter(pending_connections))
-        logger.warning(
-            f"Pending OAuth not keyed to session {session_id!r}; "
-            f"adopting sole pending key {only_key!r}. Multi-user safe binding "
-            f"requires JS to pass cl.context.session.id."
-        )
-        return pending_connections.pop(only_key)
-    return None
+    return pending_connections.pop(session_id, None)
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    # Check for pending MCP connection from OAuth flow
-    pending = _consume_pending_connection()
-    if pending:
-        token = pending["access_token"]
-        tenant = pending["tenant_url"]
-        cid = pending["client_id"]
-        cl.user_session.set("qlik_access_token", token)
-        cl.user_session.set("qlik_tenant_url", tenant)
-        cl.user_session.set("qlik_client_id", cid)
-        try:
-            await disconnect_qlik_mcp()
-            mcp_client, tools = await connect_qlik_mcp(tenant, token, cid)
-            cl.user_session.set("mcp_client", mcp_client)
-            cl.user_session.set("mcp_tools", tools)
-            build_agent_if_ready()
-            await cl.Message(
-                content=f"Connected to Qlik MCP — **{len(tools)} tools** available. Ask me anything!"
-            ).send()
-        except Exception as e:
-            logger.error(f"MCP connection failed: {e}")
-            safe = _escape_for_codeblock(e)
-            await cl.Message(content=f"Qlik MCP connection failed:\n```\n{safe}\n```").send()
+    # Fallback path: pick up any pending OAuth result that the window-message
+    # channel missed. Skipped if the window-message handler already connected.
+    if not cl.user_session.get("qlik_connected_via_window_msg"):
+        pending = _consume_pending_connection()
+        if pending:
+            await _connect_mcp_for_session(
+                pending["access_token"], pending["tenant_url"], pending["client_id"],
+            )
 
     agent = cast(CompiledStateGraph | None, cl.user_session.get("agent"))
 
@@ -464,19 +555,29 @@ async def on_message(message: cl.Message):
     response_message = cl.Message(content="")
     full_text = ""
     response_sent = False
+    chart_filter = _ChartFenceFilter()
+
+    async def emit(token: str) -> None:
+        nonlocal full_text
+        full_text += token
+        visible = chart_filter.feed(token)
+        if visible:
+            await response_message.stream_token(visible)
+
     try:
         async for msg, metadata in agent.astream(
             {"messages": message.content}, stream_mode="messages", config=config,
         ):
             if isinstance(msg, AIMessageChunk) and msg.content:
                 if isinstance(msg.content, str):
-                    await response_message.stream_token(msg.content)
-                    full_text += msg.content
+                    await emit(msg.content)
                 elif (isinstance(msg.content, list) and len(msg.content) > 0
                       and isinstance(msg.content[0], dict) and msg.content[0].get("type") == "text"):
-                    token = msg.content[0]["text"]
-                    await response_message.stream_token(token)
-                    full_text += token
+                    await emit(msg.content[0]["text"])
+        # Flush any tail held back by the filter.
+        tail = chart_filter.flush()
+        if tail:
+            await response_message.stream_token(tail)
         await response_message.send()
         response_sent = True
 

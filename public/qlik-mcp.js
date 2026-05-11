@@ -177,24 +177,45 @@
           onError("OAuth completed but no access token returned");
           return;
         }
-        // Prefer the session_id the server echoes back (came from /start),
-        // falling back to the current tab key if absent.
-        const sessionId = data.session_id || sessionKey;
-        const connectResp = await fetch("/auth/qlik/connect", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+
+        // Primary path: postMessage to Chainlit's on_window_message hook so
+        // the MCP connection happens inside the user's WebSocket session
+        // context — no extra chat message required to trigger it.
+        try {
+          window.postMessage({
+            type: "qlik_oauth_complete",
             access_token: data.access_token,
             tenant_url: data.tenant_url,
             client_id: data.client_id,
-            session_id: sessionId,
-          }),
-        });
-        if (!connectResp.ok) {
-          let errText = "Server rejected the token";
-          try { errText = (await connectResp.json()).error || errText; } catch {}
-          onError("Connect failed: " + errText);
-          return;
+          }, window.location.origin);
+        } catch (e) {
+          // Origin mismatch or other issue — fall back to the POST below.
+        }
+
+        // Fallback: POST to /auth/qlik/connect. Server stores the token keyed
+        // by session and the user's next chat message picks it up. Harmless
+        // duplicate if the window-message handler already ran.
+        const sessionId = data.session_id || sessionKey;
+        try {
+          const connectResp = await fetch("/auth/qlik/connect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              access_token: data.access_token,
+              tenant_url: data.tenant_url,
+              client_id: data.client_id,
+              session_id: sessionId,
+            }),
+          });
+          if (!connectResp.ok) {
+            // Best-effort: log but don't surface, since the window-message
+            // path may have succeeded.
+            let errText = "Server rejected the token";
+            try { errText = (await connectResp.json()).error || errText; } catch {}
+            console.warn("Qlik fallback connect failed:", errText);
+          }
+        } catch (e) {
+          console.warn("Qlik fallback connect threw:", e);
         }
         closeDialog();
         return;
