@@ -1,0 +1,204 @@
+/* Qlik Brand Theme for Chainlit */
+/* Colors: Green #009845, Gray #54565A, Navy #194268, Teal #006580 */
+
+/* Global font smoothing */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Header / top bar branding */
+header {
+  border-bottom: 2px solid #009845 !important;
+}
+
+/* Logo sizing in header — force small */
+header img {
+  max-height: 28px !important;
+  max-width: 100px !important;
+  object-fit: contain;
+}
+
+/* Primary action buttons — Qlik Green */
+button[data-testid="send-button"],
+button[data-variant="default"] {
+  background-color: #009845 !important;
+  border-color: #009845 !important;
+  color: white !important;
+}
+
+button[data-testid="send-button"]:hover,
+button[data-variant="default"]:hover {
+  background-color: #007a38 !important;
+  border-color: #007a38 !important;
+}
+
+/* Action buttons (Reconnect, etc.) */
+.cl-action-button,
+button[class*="action"] {
+  background-color: #009845 !important;
+  color: white !important;
+  border-radius: 6px !important;
+  font-weight: 600 !important;
+}
+
+.cl-action-button:hover,
+button[class*="action"]:hover {
+  background-color: #007a38 !important;
+}
+
+/* Links — Qlik Teal */
+a {
+  color: #006580 !important;
+}
+
+a:hover {
+  color: #009845 !important;
+}
+
+/* Message bubbles */
+[data-testid="assistant-message"] {
+  border-left: 3px solid #009845;
+}
+
+/* Kill the gray bg-muted container that Chainlit wraps around images */
+.bg-muted:has(> img),
+div.bg-muted.rounded-md.overflow-hidden {
+  background: transparent !important;
+  border-radius: 0 !important;
+}
+
+/* Force ALL images in assistant messages to be small */
+.sm\:max-w-sm,
+.md\:max-w-md {
+  max-width: 120px !important;
+}
+
+img.h-full.w-full.object-contain {
+  max-width: 120px !important;
+  max-height: 50px !important;
+}
+
+/* Settings sidebar polish */
+[data-testid="chat-settings"] label {
+  font-weight: 600;
+  color: #194268;
+}
+
+/* Code blocks */
+pre, code {
+  border-radius: 6px !important;
+}
+
+/* Scrollbar styling (webkit) */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #54565A;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #009845;
+}
+
+/* Powered by AWS badge — lower right corner with gradient blend */
+body::after {
+  content: "";
+  position: fixed;
+  bottom: 8px;
+  right: 8px;
+  width: 110px;
+  height: 50px;
+  background-image: url("/public/powered-by-aws.png"), radial-gradient(circle at 50% 50%, rgba(255,255,255,0.7) 0%, rgba(255,255,255,0.5) 40%, rgba(255,255,255,0.2) 65%, transparent 85%);
+  background-repeat: no-repeat;
+  background-position: center 60%;
+  background-size: 70px auto, 100% 100%;
+  opacity: 0.95;
+  z-index: 50;
+  pointer-events: none;
+  border-radius: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive — Mobile & Tablet
+   --------------------------------------------------------------------------- */
+
+/* Tablet (768px and below) */
+@media (max-width: 768px) {
+  header img {
+    max-height: 30px !important;
+  }
+
+  /* Welcome logo smaller on tablet */
+  [data-testid="assistant-message"] img {
+    max-height: 100px !important;
+  }
+
+  /* AWS badge smaller */
+  body::after {
+    width: 80px;
+    height: 36px;
+    background-size: 50px auto, 100% 100%;
+  }
+}
+
+/* Mobile (480px and below) */
+@media (max-width: 480px) {
+  header img {
+    max-height: 24px !important;
+  }
+
+  /* Welcome logo compact */
+  [data-testid="assistant-message"] img {
+    max-height: 70px !important;
+  }
+
+  /* Smaller fonts for messages */
+  [data-testid="assistant-message"],
+  [data-testid="user-message"] {
+    font-size: 14px !important;
+  }
+
+  /* Settings sidebar full width on mobile */
+  [data-testid="chat-settings"] {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* AWS badge even smaller */
+  body::after {
+    width: 60px;
+    height: 28px;
+    background-size: 40px auto, 100% 100%;
+    bottom: 4px;
+    right: 4px;
+  }
+
+  /* Tighter message padding */
+  .prose {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+}
+
+/* Small mobile (360px and below) */
+@media (max-width: 360px) {
+  header img {
+    max-height: 20px !important;
+  }
+
+  [data-testid="assistant-message"] img {
+    max-height: 50px !important;
+  }
+
+  body::after {
+    display: none;
+  }
+}
